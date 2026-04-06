@@ -4,65 +4,79 @@ from database.database import db
 class Model(db.Model):
     __abstract__ = True
 
+    _allowed_operators = {"=", ">", "<", ">=", "<=", "!="}
+
+    # ---------------- INIT ----------------
     def __init__(self):
-        self._filters = []
+        self._conditions = []
+        self._model_cls = self.__class__
 
-    
-    def where(self, column_name=None, value=None, operator="="):
-        # If called from class
-        if isinstance(self, type):
-            obj = self()
-        else:
-            obj = self
-
-        if column_name is None or value is None:
-            raise Exception("Usage: where(column, value, operator='=')")
-
-        obj._filters.append((column_name, value, operator))
-        return obj
-
-    
-    where = classmethod(where)
-
+    # ---------------- QUERY BUILDER ----------------
     @classmethod
-    def all(cls):
-        return cls.query.all()
+    def where(cls, column, value, operator="="):
+        if operator not in cls._allowed_operators:
+            raise ValueError(f"Invalid operator: {operator}")
 
-    def _apply_filters(self, query):
-        ops = {
+        if not hasattr(cls, column):
+            raise ValueError(f"Invalid column: {column}")
+
+        instance = cls()
+        instance._conditions.append((column, operator, value))
+        return instance
+
+    def and_where(self, column, value, operator="="):
+        if operator not in self._allowed_operators:
+            raise ValueError(f"Invalid operator: {operator}")
+
+        if not hasattr(self._model_cls, column):
+            raise ValueError(f"Invalid column: {column}")
+
+        self._conditions.append((column, operator, value))
+        return self
+
+    # ---------------- INTERNAL QUERY ----------------
+    def _build_query(self):
+        query = db.session.query(self._model_cls)
+
+        operators = {
             "=": lambda c, v: c == v,
-            "!=": lambda c, v: c != v,
             ">": lambda c, v: c > v,
             "<": lambda c, v: c < v,
             ">=": lambda c, v: c >= v,
             "<=": lambda c, v: c <= v,
+            "!=": lambda c, v: c != v,
         }
 
-        for col_name, value, op in self._filters:
-            if not hasattr(self.__class__, col_name):
-                raise Exception(f"Column '{col_name}' does not exist")
-
-            if op not in ops:
-                raise Exception(f"Invalid operator '{op}'")
-
-            column = getattr(self.__class__, col_name)
-            query = query.filter(ops[op](column, value))
+        for column, operator, value in self._conditions:
+            column_attr = getattr(self._model_cls, column)
+            query = query.filter(operators[operator](column_attr, value))
 
         return query
 
-    def first(self):
-        query = self.__class__.query
-        if self._filters:
-            query = self._apply_filters(query)
-
-        result = query.first()
-        self._filters = []
-        return result
-
+    # ---------------- EXECUTION METHODS ----------------
     def get(self):
-        if not self._filters:
+        if not self._conditions:
             raise Exception("get() must be used after where()")
 
-        result = self._apply_filters(self.__class__.query).all()
-        self._filters = []
+        result = self._build_query().all()
+        self._reset()
         return result
+
+    def first(self):
+        result = self._build_query().first()
+        self._reset()
+        return result
+
+    @classmethod
+    def all(cls):
+        return db.session.query(cls).all()
+
+    # ---------------- UTILITIES ----------------
+    def _reset(self):
+        self._conditions = []
+
+    def to_dict(self):
+        return {
+            column.name: getattr(self, column.name)
+            for column in self.__table__.columns
+        }
